@@ -62,8 +62,8 @@ overlayTitle <- function(plot, text) {
     text-align: center;
     padding-left: 10px; 
     padding-right: 10px; 
-    background: rgba(255,255,255,0.75);
-    font-weight: regular;
+    background: rgba(255,255,255,0.9);
+    font-weight: bold;
     font-size: 18px;
   }
   "))
@@ -73,15 +73,6 @@ overlayTitle <- function(plot, text) {
   )
   plot %>% addControl(title, position = "topleft", className = "map-title")
   
-}
-
-
-# compute distance from two coords
-calcHaversine <- function(loc1, loc2) {
-  
-  df <- matrix(c(loc1[1], loc2[1], loc1[2], loc2[2]), nrow = 2)
-  dist <- distHaversine(df)
-  return(dist)
 }
 
 
@@ -155,10 +146,12 @@ pal <- colorFactor(
     ),
   domain = major_retailers$retailer)
 
-p <- leaflet(major_retailers) %>% addTiles() %>%
+map <- leaflet(major_retailers) %>% addTiles() %>%
   addCircles(~lng, ~lat,color = ~pal(retailer)) %>%
   overlayTitle("Major Retailer Store Locations") %>%
-  addLegend(position = "bottomright", values = ~retailer, pal = pal); p
+  addLegend(position = "bottomright", values = ~retailer, pal = pal)
+
+map
 ```
 
 ### Purchase of Competitor
@@ -277,9 +270,11 @@ combined_stores <- major_retailers %>%
   filter(retailer %in% c('Tesco', 'Morrisons'))
 
 # now we have pretty good coverage across the UK
-p <- leaflet(combined_stores) %>% addTiles() %>%
+map <- leaflet(combined_stores) %>% addTiles() %>%
   addCircles(~lng, ~lat,color = 'blue', radius = 500, opacity = .5) %>%
-  overlayTitle("Tesco Store Locations"); p
+  overlayTitle("Tesco Store Locations")
+
+map
 
 # save down combined dataset
 write_rds(combined_stores, "data/combined_store.rds")
@@ -381,7 +376,7 @@ After creating a combined portfolio "post acquisition", we will decide where bes
 
 The method take will be to form clusters, based on geospatial location that capture the closest stores, while minimising overlap. The distribution warehouses/depots will then be located at the centroids of the clusters.
 
-The aim is to split the locations into c.20 regions
+The aim is to split the locations into c.20 regions (and subsequently depots)
 
 ```{r}
 # load combined store set
@@ -402,7 +397,7 @@ A few different clustering approaches were trialed as part of this work:
 - Density-based clustering: DBSCAN
 - Hierarchical clustering: Agglomerative
 
-While KMeans produced good results, this methoid was discounted as it is bad practice to use with geospatial data. This is because it assumes coordinates are described in Euclidean coordinate system (which latitude and longitude are not). So while it may produce reasonable results for locations close together on Earth, it fails to account for any curvature when clustering locations that are far away
+While KMeans produced good results, this method was discounted as it is bad practice to use with geospatial data. This is because it assumes coordinates are described in Euclidean coordinate system (which latitude and longitude are not). So while it may produce reasonable results for locations close together on Earth, it fails to account for any curvature when clustering locations that are far away
 
 Meanwhile, DBSCAN (which looks to cluster based on variations in location denisty) produced strong clusters for most urban locations (e.g. big cities), but effective grouped all less dense areas into a few large clusters (which is ineffective for our use case)
 
@@ -429,10 +424,12 @@ pal <- colorFactor(
   palette = "RdYlBu",
   domain = locs_df_km$clust)
 
-p <- leaflet(locs_df_km) %>% addProviderTiles(providers$CartoDB.Positron) %>%
+map <- leaflet(locs_df_km) %>% addProviderTiles(providers$CartoDB.Positron) %>%
   addCircles(~lng, ~lat,color = ~pal(clust)) %>%
   overlayTitle("Store Clusters") %>%
-  addLegend(position = "bottomright", values = ~clust, pal = pal); p
+  addLegend(position = "bottomright", values = ~clust, pal = pal)
+
+map
 
 
 # plot store count by cluster
@@ -461,11 +458,12 @@ pal <- colorFactor(
   palette = "RdYlBu",
   domain = locs_df_db$clust)
 
-p <- leaflet(locs_df_db) %>% addProviderTiles(providers$CartoDB.Positron) %>%
+map <- leaflet(locs_df_db) %>% addProviderTiles(providers$CartoDB.Positron) %>%
   addCircles(~lng, ~lat,color = ~pal(clust)) %>%
   overlayTitle("Store Clusters") %>%
-  addLegend(position = "bottomright", values = ~clust, pal = pal); p
+  addLegend(position = "bottomright", values = ~clust, pal = pal)
 
+map
 ```
 
 
@@ -498,10 +496,12 @@ pal <- colorFactor(
   palette = "RdYlBu",
   domain = locs_df_hc$clust)
 
-p <- leaflet(locs_df_hc) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+map <- leaflet(locs_df_hc) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
   addCircles(~lng, ~lat,color = ~pal(clust)) %>%
   overlayTitle("Store Clusters") %>%
-  addLegend(position = "bottomright", values = ~clust, pal = pal); p
+  addLegend(position = "bottomright", values = ~clust, pal = pal)
+
+map
 ```
 
 When viewing on a map, it appears to be an initially very sensible clustering. However, there looks to be some very small clusters, which it may not be logical to treat as a cluster in and of itself.
@@ -538,10 +538,12 @@ cluster_number <- 18
 sample_cluster <- locs_df_hc %>%
   filter(clust == cluster_number)
 
-p <- leaflet(sample_cluster) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+map <- leaflet(sample_cluster) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
   addCircles(~lng, ~lat,color = ~pal(clust)) %>%
   overlayTitle("Store Clusters") %>%
-  addLegend(position = "bottomright", values = ~clust, pal = pal); p
+  addLegend(position = "bottomright", values = ~clust, pal = pal)
+
+map
 ```
 
 
@@ -580,10 +582,12 @@ pal <- colorFactor(
   palette = "RdYlBu",
   domain = locs_df_hc_cut$clust2)
 
-p <- leaflet(locs_df_hc_cut) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+map <- leaflet(locs_df_hc_cut) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
   addCircles(~lng, ~lat,color = ~pal(clust2)) %>%
   overlayTitle("Store Clusters") %>%
-  addLegend(position = "bottomright", values = ~clust2, pal = pal); p
+  addLegend(position = "bottomright", values = ~clust2, pal = pal)
+
+map
 ```
 
 Now that we have sensible clusters forming, the next step is to determine the location of the warehouses/depots that will service each region. For this, I will use simply the centroids - which can be computed using the mean lat,lng values
@@ -595,11 +599,13 @@ cluster_centroids <- locs_df_hc_cut %>%
   summarize(mean_lng = mean(lng, na.rm=TRUE), mean_lat = mean(lat, na.rm=TRUE))
 
 
-p <- leaflet(locs_df_hc_cut) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+map <- leaflet(locs_df_hc_cut) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
   addCircles(~lng, ~lat,color = ~pal(clust2)) %>%
   overlayTitle("Store Clusters") %>%
   addLegend(position = "bottomright", values = ~clust2, pal = pal) %>%
-  addMarkers(data = cluster_centroids, ~mean_lng, ~mean_lat, label = ~as.character(clust2)); p
+  addMarkers(data = cluster_centroids, ~mean_lng, ~mean_lat, label = ~as.character(clust2))
+
+map
 ```
 
 Now we have the warehouse locations, and some initial clusters. However, we will see that in some cases the hierarchical clustering does not result in sensible assignments. For example, there are situations where bodies of water exist that simply clustering by coordinates (lat, lng) will be unable to take account of.
@@ -614,11 +620,13 @@ sample_cluster <- locs_df_hc_cut %>%
 sample_centroid <- cluster_centroids %>%
   filter(clust2 == cluster_number)
 
-p <- leaflet(sample_cluster) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+map <- leaflet(sample_cluster) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
   addCircles(~lng, ~lat,color = ~pal(clust)) %>%
   overlayTitle("Store Clusters") %>%
   addLegend(position = "bottomright", values = ~clust2, pal = pal) %>%
-  addMarkers(data = sample_centroid, ~mean_lng, ~mean_lat); p
+  addMarkers(data = sample_centroid, ~mean_lng, ~mean_lat)
+
+map
 ```
 
 In practice this means that the drive distance required from the depot to restock the store is far greater than initially anticipated. Furthermore, there may be a nearer depot (belonging to another cluster) that is better suited for restocking this store.
@@ -682,7 +690,7 @@ for (row in 1:nrow(store_locations)){
   
   cluster_vector <- append(cluster_vector, nearest_warehouse)
   
-  if (row%%10 == 0){
+  if (row%%100 == 0){
     print(paste0(row,"/",nrow(store_locations)))
   }
   
@@ -706,27 +714,32 @@ Now we can re-plot the updated cluster assignments to check that previous issues
 store_locations_updated <- read_rds("data/master_store_df.rds")
 warehouse_locations <- read_rds("data/warehouse_locations.rds")
 
+# print number of changed locations
+print(count(store_locations_updated, same_cluster, sort = TRUE))
 
 # plot the new clusters
 pal <- colorFactor(
   palette = "RdYlBu",
   domain = store_locations_updated$updated_cluster)
 
-p <- leaflet(store_locations_updated) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+map <- leaflet(store_locations_updated) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
   addCircles(~lng, ~lat,color = ~pal(updated_cluster), label = ~as.character(updated_cluster)) %>%
   overlayTitle("Store Clusters") %>%
   addLegend(position = "bottomright", values = ~updated_cluster, pal = pal) %>%
-  addMarkers(data = warehouse_locations, ~lng, ~lat, label = ~as.character(cluster)); p
+  addMarkers(data = warehouse_locations, ~lng, ~lat, label = ~as.character(cluster))
 
+map
 ```
 
 
 
-### Assigning Master vs Sub Warehouses/Depots
+### Assigning Primary vs Secondary Warehouses/Depots
 
-The last thing we will do is to decide the appropriate mix of main warehouses/depots, and satellites/subs. We will aim for just 5 master depots, with 15 sub depots for servicing regions.
+The last thing we will do is to decide the appropriate mix of main/primary warehouses, and satellites/secondary ones. In practice it is often the case that a company operates several main distributions centres, which are then responsible for sending stock to smaller warehouses that service specific geographic regions.
 
-For this we will look at the store count assigned to each cluster (with the idea being to assign main depots as those with most associated stores), and the geographic spread (to ensure our main depots offer adequate coverage across the country).
+We will replicate this approach by aiming for just 5 primary depots, with 15 secondary depots for servicing the remaining regions.
+
+For this we will look at the store count assigned to each cluster (with the idea being to assign primary depots are those with most associated stores), and the geographic spread (to ensure our primary depots offer adequate coverage across the country).
 
 This part is a slightly manual process.
 
@@ -751,20 +764,22 @@ pal <- colorFactor(
   palette = "RdYlBu",
   domain = top_7_clusters$updated_cluster)
 
-p <- leaflet(top_7_clusters) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+map <- leaflet(top_7_clusters) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
   addCircles(~lng, ~lat,color = ~pal(updated_cluster)) %>%
   overlayTitle("Store Clusters") %>%
   addLegend(position = "bottomright", values = ~updated_cluster, pal = pal) %>%
-  addMarkers(data = warehouse_locations, ~lng, ~lat, label = ~as.character(cluster)); p
+  addMarkers(data = warehouse_locations, ~lng, ~lat, label = ~as.character(cluster))
+
+map
 ```
 
-- London: Unsurprisingly London, with such a high population, captures the two largest clusters (3 & 12). Given the size of these clusters, we will take both as master depots
-- Manchester: The third biggest cluster (11) is located in Manchester. Given the ability to service the second largest number of stores, as well as the norther regions, it is reasonable to also take this as a master depot.
-- Birmingham: The decision for the next master depot, becomes a weigh up between clusters 1 & 15. However, given the proximity of cluster 15 to Manchester, I chose to select location 1 as a master depot, given it can be used to service service Wales and the Midlands, with the East of England being serviced out of Manchester or London as appropriate.
-- Glasgow: Lastly, it is also reasonable to assume a northern depot in Scotland to service the country, North of England, and Northern Ireland sub-depots. Glasgow (cluster 14) has the highest number of stores and is well located to service Northern Ireland on the west coast.
+- London: Unsurprisingly London, with such a high population, captures the two largest clusters (3 & 12). Given the size of these clusters, we will take both as primary depots
+- Manchester: The third biggest cluster (11) is located in Manchester. Given the ability to service the second largest number of stores, as well as the norther regions, it is reasonable to also take this as a primary depot.
+- Birmingham: The decision for the next primary depot, becomes a weigh up between clusters 1 & 15. However, given the proximity of cluster 15 to Manchester, I chose to select location 1 as a primary depot, given it can be used to service service Wales and the Midlands, with the East of England being serviced out of Manchester or London as appropriate.
+- Glasgow: Lastly, it is also reasonable to assume a northern depot in Scotland to service the country, North of England, and Northern Ireland secondary depots. Glasgow (cluster 14) has the highest number of stores and is well located to service Northern Ireland on the west coast.
 
 
-From manual investigation, and some business logic we have assigned our 5 master depots. However, it is worth noting that this could be done using driving distance (e.g. pick 5 locations that minimise aggregated drive time to reach all sub-depots), or some alternative business logic. This would be an area of possible improvement.
+From manual investigation, and some business logic we have assigned our 5 primary depots. However, it is worth noting that this could be done using driving distance (e.g. pick 5 locations that minimise aggregated drive time to reach all secondary depots), or some alternative business logic. This would be an area of possible improvement.
 ```{r}
 # plot the final map
 master_depots <- c(1, 3, 11, 12, 14)
@@ -782,32 +797,32 @@ pal <- colorFactor(
   palette = "RdYlBu",
   domain = store_locations_updated$updated_cluster)
 
-p <- leaflet(store_locations_updated) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+map <- leaflet(store_locations_updated) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
   addCircles(~lng, ~lat,color = ~pal(updated_cluster)) %>%
   overlayTitle("Store Clusters") %>%
   addLegend(position = "bottomright", values = ~updated_cluster, pal = pal) %>%
-  addAwesomeMarkers(data = warehouse_locations, ~lng, ~lat, icon = icons, label = ~as.character(cluster)); p
+  addAwesomeMarkers(data = warehouse_locations, ~lng, ~lat, icon = icons, label = ~as.character(cluster))
 
-
+map
 ```
 
 
 ### Potential Improvements
 
 #### Vehicle Routing:
-The next step would be to determine the most optimal driving routes for trucks to leave each of the master depots to service the sub depots - i.e what is the most efficient method of trucks, leaving each of the the master depots, to service the sub-depots in our network. 
+The next step would be to determine the most optimal driving routes for trucks to leave each of the primary depots to service the secondary depots - i.e what is the most efficient method of trucks, leaving each of the the primary depots, to service the secondary depots in our network. 
 
-If we assume, given the size of deliveries, it is realistic to have a single truck per sub-depot restock, the problem becomes simply a shortest duration calculation from each sub-depot to the master depots - which OSRM docker can handle.
+If we assume, given the size of deliveries, it is realistic to have a single truck per secondary depot restock, the problem becomes simply a shortest duration calculation from each secondary depot to the primary depots - which OSRM docker can handle.
 
-However, if you want just one truck per depot to be responsible for restocking each of the associated sub-depots, then we need to frame the problem as a "travelling salesman problem" - i.e. what is the shortest route for a single truck to visit all the necessary stops just once and return home to the master depot? For this, I would recommend exploring the VROOM Project (Vehicle Routing Open-Source Optimisation Machine): https://github.com/VROOM-Project 
+However, if you want just one truck per depot to be responsible for restocking each of the associated secondary depots, then we need to frame the problem as a "travelling salesman problem" - i.e. what is the shortest route for a single truck to visit all the necessary stops just once and return home to the primary depot? For this, I would recommend exploring the VROOM Project (Vehicle Routing Open-Source Optimisation Machine): https://github.com/VROOM-Project 
 
 
-#### Master Depot Selection:
-As mentioned above, another potential improvement could be to select the location of the master depots, based not on the number of locations and manual business logic, but based on which 5 locations minimise the drive time to each of the remaining sub-depots. For this we could use OSRM docker also.
+#### Primary Depot Selection:
+As mentioned above, another potential improvement could be to select the location of the primary depots, based not on the number of locations and manual business logic, but based on which 5 locations minimise the drive time to each of the remaining secondary depots. For this we could use OSRM docker also.
 
 
 #### Cluster Pruning:
-While arlier on we disregarded clusters that were extremely remote, there are still a few locations contained in our clusters that are rather remote, with the cluster being fairly spread (e.g. North East Scotland). 
+While earlier on we disregarded clusters that were extremely remote, there are still a few locations contained in our clusters that are rather remote, with the cluster being fairly spread (e.g. North East Scotland). 
 
 To address this, we could iteratively remove locations from our dataset that are a certain distance from the nearest cluster centre, and then perform reclustering. The intention would be to repeatedly "prune" the most remote locations in between rounds of clustering.
 
@@ -816,6 +831,6 @@ This would result in more densely formed regions, but at the expense of excludin
 
 
 ### Closing Comments
-There we have it, our clustered store territories, with the proposed location of each warehouse and a proposed view of which should me major depots, and which should be sub-depots.
+There we have it, our clustered store territories, with the proposed location of each warehouse and a proposed view of which should me major depots, and which should be secondary depots.
 
 While there are a few areas of potential improvement noted above, this project introduces and initial approach that can be taken to optimise logistics networks using geospatial data. The tools and techniques introduced can be used in their current form, or take further with mor complex approaches, to help companies gain actionable insights into their logistics, marketing, or acquisition approaches - and gain a competitive edge in their respective market.

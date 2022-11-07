@@ -26,7 +26,7 @@ The first step is to correctly install Docker. This can be a little painful at t
 
 ### Installing OSRM Docker
 
-Now Docker is up and running, the next stage is th download and compile the OSRM. The fgollowing instructions adapted from the official documentation here: https://github.com/Project-OSRM/osrm-backend
+Now Docker is up and running, the next stage is th download and compile the OSRM. The following instructions adapted from the official documentation here: https://github.com/Project-OSRM/osrm-backend
 
 1. Create a directory into which you'll install your repositories you wish to unpack for Docker
 
