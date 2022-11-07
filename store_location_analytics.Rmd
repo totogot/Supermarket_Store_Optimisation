@@ -169,7 +169,7 @@ Assuming we are Tesco (as the largest supermarket) and are looking to acquire on
 
 2. Of the stores with minimal overlap in coverage, which have a profile of store locations that best matches Tesco's business strategy
 ```{r}
-# we will set a cut-off of 500m each other - based on Haversine distance
+# we will set a cut-off of 500m each other - based on Great Circle distance
 major_retailers <- major_retailers %>% 
   rowwise %>%
   mutate(coordinates = list(c(lng, lat))) %>%
