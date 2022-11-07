@@ -1,0 +1,821 @@
+---
+title: "Supermarket_Store_Analytics"
+author: "totogot"
+output: html_notebook
+---
+
+##Introduction
+This notebook leverages 20th Edition of Geolytix Open Supermarket Retail Points data set to perform some analytics on geospatial data.
+
+The perceived task at hand assumes a large supermarket chain in the UK (Tesco) is interesting in acquiring a competitor chain, following which the challenge is to identify reasonable geographic regions into which to segment he stores, and most appropriate locations to position warehouse depots for stocking the stores.
+
+The approach taken makes use of clustering techniques, as well as third part applications (run on Docker) to arrive at a solution.
+
+The intention is to provide an example of how to work with geospatial data, in a way that could be applicable to a range of different industries - from logistics to marketing - and sectors - from retail to healthcare.
+
+
+
+##Install Packages
+```{r}
+#install.packages("leaflet")
+#install.packages("tidyverse")
+#install.packages("leaflet")
+#install.packages("httr")
+#install.packages("writexl")
+#install.packages("readxl")
+#install.packages("leaflet")
+#install.packages("geosphere")
+#install.packages("sf")
+#install.packages("cluster")
+#install.packages("factoextra")
+#install.packages("dendextend")
+#install.packages("dbscan")
+#install.packages("curl")
+
+library(httr)
+library(readxl)
+library(ggplot2)
+library(tidyverse)
+library(leaflet)
+library(htmltools)
+library(geosphere)
+library(sf)
+library(cluster)
+library(factoextra)
+library(dendextend)
+library(dbscan)
+library(curl)
+```
+
+
+
+## Define Functions
+```{r}
+# add leaflet title
+overlayTitle <- function(plot, text) {
+  
+  tag.map.title <- tags$style(HTML("
+  .leaflet-control.map-title { 
+    transform: translate(-50%,20%);
+    position: fixed !important;
+    left: 50%;
+    text-align: center;
+    padding-left: 10px; 
+    padding-right: 10px; 
+    background: rgba(255,255,255,0.75);
+    font-weight: regular;
+    font-size: 18px;
+  }
+  "))
+  
+  title <- tags$div(
+    tag.map.title, HTML(text)
+  )
+  plot %>% addControl(title, position = "topleft", className = "map-title")
+  
+}
+
+
+# compute distance from two coords
+calcHaversine <- function(loc1, loc2) {
+  
+  df <- matrix(c(loc1[1], loc2[1], loc1[2], loc2[2]), nrow = 2)
+  dist <- distHaversine(df)
+  return(dist)
+}
+
+
+# compute the number of locations within 500m
+calcCloseStore <- function(master_stores, target_stores) {
+  
+  # convert both tables to sf standard
+  master_stores_sf <- st_as_sf(master_stores, coords=c('lng', 'lat'), crs="epsg:4326")
+  target_stores_sf <- st_as_sf(target_stores, coords=c('lng', 'lat'), crs="epsg:4326")
+  
+  # compute distance matrix
+  # each row represents a target location and columns their distance to a master store (in meters)
+  dist = st_distance(target_stores_sf, master_stores_sf)
+  
+  # convert to dataframe and compute the row min (we only care if it is within 500m not how often)
+  dist <- data.frame(dist)
+  dist$min <- apply(dist[], MARGIN =  1, FUN = min)
+  
+  # compute number of stores within 500m of a master brand store
+  dist_close <- dist %>% 
+    filter(min <=500)
+  
+  close_stores <- nrow(dist_close)
+  
+  return(close_stores)
+}
+```
+
+
+
+## Main Run
+```{r}
+# load starting data
+all_stores <- read_xls('data/GEOLYTIX - UK RetailPoints/uk_glx_open_retail_points_v24_202206.xls')
+
+# plot store count by retailer
+retailer_count <- all_stores %>%
+  group_by(retailer) %>%
+  tally()
+
+ggplot(retailer_count, aes(x = reorder(retailer, -n), y = n)) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.3))
+
+# plot store count by cluster as %
+retailer_count <- retailer_count %>%
+  mutate(percentage = (n / sum(n))*100)
+
+ggplot(retailer_count, aes(x = reorder(retailer, -percentage), y = percentage)) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.3))
+```
+
+```{r}
+# create list of largest stores
+majors <- c("Aldi", "Asda", "Lidl", "Marks and Spencer", "Morrisons", 
+            "Sainsburys", "Tesco", "The Co-operative Group", "Waitrose")
+
+# compute % of stores captured by major chains
+print(retailer_count %>% filter(retailer %in% majors) %>% pull(percentage) %>% sum)
+# 66.975 %
+# the major chains capture 2/3rds of the universe
+
+# plot location of major chains
+major_retailers <- all_stores %>% filter(`retailer` %in% majors) %>%
+  select(id, retailer, postcode, lng = long_wgs, lat = lat_wgs, size_band)
+
+pal <- colorFactor(
+  palette = c(
+    "cyan", "green", "purple", "black", "yellow", "orange", "blue", "turquoise", "red" 
+    ),
+  domain = major_retailers$retailer)
+
+p <- leaflet(major_retailers) %>% addTiles() %>%
+  addCircles(~lng, ~lat,color = ~pal(retailer)) %>%
+  overlayTitle("Major Retailer Store Locations") %>%
+  addLegend(position = "bottomright", values = ~retailer, pal = pal); p
+```
+
+### Purchase of Competitor
+
+Assuming we are Tesco (as the largest supermarket) and are looking to acquire one of the other chains, we could need to set a series of conditions under which we would acquire a competitor. In this example, let's imagine these are simply:
+
+1. Acquire based on which chain offers the "best coverage"- where there is minimum overlap with existing Tesco locations. i.e. find the competitor where least % of stores within a certain radius of Tesco stores
+
+2. Of the stores with minimal overlap in coverage, which have a profile of store locations that best matches Tesco's business strategy
+```{r}
+# we will set a cut-off of 500m each other - based on Haversine distance
+major_retailers <- major_retailers %>% 
+  rowwise %>%
+  mutate(coordinates = list(c(lng, lat))) %>%
+  ungroup
+
+# isolate the tesco locations
+tesco_loc <- major_retailers %>%
+  filter(retailer == "Tesco")
+
+# obtain list of all other target brands
+targets <- majors[majors != 'Tesco']
+
+# iterate and compute % of each brand within 500m
+for (brand in targets){
+  
+  target_loc <- major_retailers %>%
+    filter(retailer == brand)
+  
+  close_stores <- calcCloseStore(tesco_loc, target_loc)
+  
+  print(brand)
+  print((close_stores/nrow(target_loc))*100)
+}
+# ------results
+# "Aldi"
+# 26.34298
+# "Asda"
+# 14.28571
+# "Lidl"
+# 29.41788
+# "Marks and Spencer"
+# 33.98876
+# "Morrisons"
+# 12.31964
+# "Sainsburys"
+# 33.30966
+# "The Co-operative Group"
+# 15.45048
+# "Waitrose"
+# 35.18006
+```
+
+From the above results we see that Morrisons and Asda have the lowest %. We can now explore the profile of their respective store portfolios (to see the number of stores these brands offer by size)
+```{r}
+print(retailer_count %>% filter(retailer %in% c('Asda', 'Morrisons', 'The Co-operative Group')))
+# Asda        637
+# Morrisons   901
+# Coop        2686
+
+# as well as the array of store sizes - and how this compares to Tesco
+store_size_counts <- all_stores %>%
+  filter(retailer %in% c('Tesco', 'Asda', 'Morrisons', 'The Co-operative Group')) %>%
+  group_by(retailer, size_band) %>%
+  tally() %>%
+  group_by(retailer) %>%
+  mutate(percentage_stores = (n / sum(n))*100)
+
+
+ggplot(store_size_counts, aes(x = size_band, y = percentage_stores, fill=retailer)) +
+  geom_col(position = "dodge") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.3))
+```
+From glancing at the charts, it is fairly obvious on first inspection that's Morrisons portfolio profile is more similar to Tesco than Asda, but let's prove it statistically.
+
+For this, we can leverage the chi-squared test. The chi-squared is used to evaluate whether there is significant association between the categories of two categorical variables. In theory it is designed to assess whether the two variables are independent of one another.
+
+However, in our case we can view the different supermarket brands as our variables, and we could look for the brands to have low levels of independence compared to the Tesco distribution - as lower independence is equal to higher similarity in our case
+
+```{r}
+# convert to the correct structure
+size_counts_wide <- store_size_counts %>%
+  select(-n) %>%
+  pivot_wider(names_from = retailer, values_from = percentage_stores) %>%
+  replace(is.na(.), 0)
+
+target_brands <- store_size_counts %>%
+  select(retailer) %>%
+  unique()
+
+target_brands <- target_brands[target_brands != 'Tesco']
+
+for (brand in target_brands){
+  
+  comparisons <- size_counts_wide %>%
+    select(Tesco, brand)
+  
+  chisq <- chisq.test(comparisons)
+  
+  print(brand)
+  print(chisq)
+}
+```
+From the above we want to keep in mind the null hypothesis - which is to say that as p-value tends towards 0, the interdependence between the two distributions (i.e. similarity in behaviour) becomes less. Theoretically if p>=0.05 then the variables are not interdependent.
+
+In our case (whil not >= 0.05) we see that the p-value for Morrisons is orders of magnitude greater than for the other brands, meaning it has the most similar profile - as expected. 
+
+In fact, Asda has a distinctly different business model, with far greater focus (with >50% of their stores) on large superstores (over 2800m2). Meanwhile, the Co-operative operates a set of primarily small stores, with zero superstores in the group.
+
+Given Morrisons has one of the lower % of overlap, and the most similar profile, we elect to "acquire" it
+
+```{r}
+# create a combined dataset
+combined_stores <- major_retailers %>%
+  filter(retailer %in% c('Tesco', 'Morrisons'))
+
+# now we have pretty good coverage across the UK
+p <- leaflet(combined_stores) %>% addTiles() %>%
+  addCircles(~lng, ~lat,color = 'blue', radius = 500, opacity = .5) %>%
+  overlayTitle("Tesco Store Locations"); p
+
+# save down combined dataset
+write_rds(combined_stores, "data/combined_store.rds")
+```
+
+
+
+### Identifying Which Stores to Close
+
+Now we have a group of store locations, next we can optimise the portfolio we will do this by opting to close stores in the same location and then defining some logic to prioritise which stores to keep stores
+
+
+```{r}
+# load checkpoint dataset
+combined_stores <- read_rds("data/combined_store.rds")
+
+# split by brand
+tesco_stores <- combined_stores %>%
+  filter(retailer == 'Tesco')
+
+morrisons_stores <- combined_stores %>%
+  filter(retailer == 'Morrisons')
+
+
+# convert both tables to sf standard
+tesco_stores_sf <- st_as_sf(tesco_stores, coords=c('lng', 'lat'), crs="epsg:4326")
+morrisons_stores_sf <- st_as_sf(morrisons_stores, coords=c('lng', 'lat'), crs="epsg:4326")
+
+# compute distance matrix
+dist_sf = st_distance(tesco_stores_sf, morrisons_stores_sf)
+
+# note: each row represents a Tesco location and columns their distance to a Morrisons store (in meters)
+M <- as.matrix(dist_sf)
+M <- unclass(M)
+
+#create binary matrix to show where Tesco store (row) within 500m of Morrisons (column) 
+M[] <- ifelse(M<500,1,0)
+
+# convert to dataframe and add column to indicate Tesco index number
+dist_sf <- data.frame(M)
+
+dist_sf <- rownames_to_column(dist_sf) %>%
+  rename(tesco_index = rowname)
+
+# convert from wide-form to long-form
+close_store_df <- dist_sf %>% 
+  gather(key = morrisons_index, value = flag, -c(tesco_index)) %>%
+  filter(flag == 1)
+
+# clean up the morrions index column - removing the "X" from the naming convention
+close_store_df <- close_store_df %>%
+  rowwise() %>%
+  mutate(morrisons_index = str_remove(morrisons_index, "X")) %>%
+  ungroup
+
+# check if we have any duplicates (i.e. one store close to two others)
+nrow(close_store_df)
+# 121
+n_distinct(close_store_df$tesco_index)
+# 117
+n_distinct(close_store_df$morrisons_index)
+# 111
+
+# join back to the Tesco master to indicate Morrisons locations
+tesco_stores_df <- rownames_to_column(tesco_stores) %>%
+  rename(tesco_index = rowname) %>%
+  inner_join(close_store_df, by='tesco_index')
+
+# join on the relevant Morrisons store data
+morrisons_stores_df <- rownames_to_column(morrisons_stores) %>%
+  rename(morrisons_index = rowname)
+  
+store_pairs <- tesco_stores_df %>%
+  left_join(morrisons_stores_df, by='morrisons_index')
+```
+Now we have found all the store pairs (i.e. those that are within 500m of each other) from across the Tesco vs Morrison's portfolio. The next stage would be to decide the logic on which to keep stores.
+
+In our case (and for ease of progressing with the rest of the project notebook), we will assume that we will simply remove the Morrison's store, and keep the existing Tesco stores.
+
+However, in practice you may wish to look at demographic (specifically household income, or population density) data by postcode, and make some assumptions around whether you want higher price goods (usually in smaller stores) in areas of higher density or income. 
+
+```{r}
+remove_ids <- store_pairs$id.y 
+
+combined_cut <- combined_stores %>% 
+  filter(!id %in% remove_ids)
+
+nremove = nrow(combined_stores) - nrow(combined_cut)
+print(paste0('number of stores removed: ', nremove))
+
+write_rds(combined_cut, "data/combined_cut.rds")
+```
+
+
+
+### Identifying Most Appropriate Warehouse Locations
+
+After creating a combined portfolio "post acquisition", we will decide where best to set up supply depots to stock the stores, which we will achieve by first grouping stores into sensible geographic regions - and then assign a depot to each region. 
+
+The method take will be to form clusters, based on geospatial location that capture the closest stores, while minimising overlap. The distribution warehouses/depots will then be located at the centroids of the clusters.
+
+The aim is to split the locations into c.20 regions
+
+```{r}
+# load combined store set
+master_stores <- read_rds("data/combined_cut.rds")
+
+# take just the lat and lng coordinates
+locs_df <- master_stores %>%
+  select("id","lng", "lat") %>%
+  column_to_rownames("id")
+
+# set random seed to ensure repeatability of clustering
+set.seed(123)
+```
+
+
+A few different clustering approaches were trialed as part of this work:
+- Partition-based clustering: KMeans
+- Density-based clustering: DBSCAN
+- Hierarchical clustering: Agglomerative
+
+While KMeans produced good results, this methoid was discounted as it is bad practice to use with geospatial data. This is because it assumes coordinates are described in Euclidean coordinate system (which latitude and longitude are not). So while it may produce reasonable results for locations close together on Earth, it fails to account for any curvature when clustering locations that are far away
+
+Meanwhile, DBSCAN (which looks to cluster based on variations in location denisty) produced strong clusters for most urban locations (e.g. big cities), but effective grouped all less dense areas into a few large clusters (which is ineffective for our use case)
+
+Hierarchical clustering produced the best results - please skip to below code segment to see
+
+Note: While code segments for both KMeans and DBSCAN are presented below, for interest only. To continue with the notebook, these can be skipped, and you can jump to the Hierarchical code below
+
+
+KMEANS - FOR INTEREST ONLY
+```{r}
+# Compute k-means with k = 20 (i.e. 20 regions)
+km.res <- kmeans(locs_df, 20)
+
+# assign the cluster numbers
+locs_df_km<- locs_df %>% 
+  mutate(clust = km.res$cluster)
+
+# print
+length(unique(locs_df_km$clust))
+# 20
+
+# plot outputs
+pal <- colorFactor(
+  palette = "RdYlBu",
+  domain = locs_df_km$clust)
+
+p <- leaflet(locs_df_km) %>% addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircles(~lng, ~lat,color = ~pal(clust)) %>%
+  overlayTitle("Store Clusters") %>%
+  addLegend(position = "bottomright", values = ~clust, pal = pal); p
+
+
+# plot store count by cluster
+cluster_count_km <- locs_df_km %>%
+  group_by(clust) %>%
+  tally()
+
+ggplot(cluster_count_km, aes(x = reorder(clust, -n), y = n)) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.3))
+
+```
+
+DBSCAN - FOR INTEREST ONLY
+```{r}
+clusters <- dbscan(locs_df, eps = 0.25, minPts = 70)[['cluster']]
+
+length(unique(clusters))
+# 20
+
+locs_df_db <- locs_df %>%
+  mutate(clust = clusters)
+
+# plot outputs
+pal <- colorFactor(
+  palette = "RdYlBu",
+  domain = locs_df_db$clust)
+
+p <- leaflet(locs_df_db) %>% addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircles(~lng, ~lat,color = ~pal(clust)) %>%
+  overlayTitle("Store Clusters") %>%
+  addLegend(position = "bottomright", values = ~clust, pal = pal); p
+
+```
+
+
+
+HIERARCHICAL - CHOSEN APPROACH
+```{r}
+# compute distance matrix - between location pairs
+locs_sf <- st_as_sf(locs_df, coords=c('lng', 'lat'), crs="epsg:4326")
+dist_sf = st_distance(locs_sf, locs_sf)
+mdist <- as.matrix(dist_sf)
+mdist <- unclass(mdist)
+
+# cluster based on distance to other locations
+hc <- hclust(as.dist(mdist), method="complete")
+
+# plot dendogram
+plot(hc, cex = 0.6, hang = -1)
+
+# cluster based on defined distance separation - trialed in order to get 20 clusters
+d <- 215000
+locs_df_hc <- locs_df %>%
+  mutate(clust = cutree(hc, h=d))
+
+# print
+length(unique(locs_df_hc$clust))
+# 20
+
+# plot outputs
+pal <- colorFactor(
+  palette = "RdYlBu",
+  domain = locs_df_hc$clust)
+
+p <- leaflet(locs_df_hc) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+  addCircles(~lng, ~lat,color = ~pal(clust)) %>%
+  overlayTitle("Store Clusters") %>%
+  addLegend(position = "bottomright", values = ~clust, pal = pal); p
+```
+
+When viewing on a map, it appears to be an initially very sensible clustering. However, there looks to be some very small clusters, which it may not be logical to treat as a cluster in and of itself.
+
+We explore this further by looking at the spread of store counts in each
+
+```{r}
+
+# plot store count by cluster
+cluster_count_hc <- locs_df_hc %>%
+  group_by(clust) %>%
+  tally()
+
+ggplot(cluster_count_hc, aes(x = reorder(clust, -n), y = n)) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.3))
+
+# plot store count by cluster as %
+cluster_count_hc <- cluster_count_hc %>%
+  mutate(percentage = (n / nrow(locs_df_hc))*100)
+
+ggplot(cluster_count_hc, aes(x = reorder(clust, -percentage), y = percentage)) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.3))
+```
+
+From the above chart, it's obvious that there are clusters with few store locations. Plotting these on the map (e.g. below code segment), shows that these tend to be in isolated locations - e.g. Shetland Islands, Hebrides, Orkney Islands, or Guernsey & Jersey
+
+All of these have <1% of the total store locations (which is how we will decide to remove them)
+```{r}
+# plot outputs - exploratory only
+cluster_number <- 18
+
+sample_cluster <- locs_df_hc %>%
+  filter(clust == cluster_number)
+
+p <- leaflet(sample_cluster) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+  addCircles(~lng, ~lat,color = ~pal(clust)) %>%
+  overlayTitle("Store Clusters") %>%
+  addLegend(position = "bottomright", values = ~clust, pal = pal); p
+```
+
+
+We will remove such remote locations from our analysis and re-cluster
+```{r}
+# remove those with less than 1%
+remote_clusters <- cluster_count_hc %>%
+  filter(percentage < 1) %>%
+  select(clust)
+
+locs_df_hc_cut <- locs_df_hc %>%
+  filter(!clust %in% remote_clusters$clust)
+
+# compute distance matrix - between location pairs
+locs_sf <- st_as_sf(locs_df_hc_cut %>% select(lng, lat), coords=c('lng', 'lat'), crs="epsg:4326")
+dist_sf = st_distance(locs_sf, locs_sf)
+mdist <- as.matrix(dist_sf)
+mdist <- unclass(mdist)
+
+# plot dendogram
+hc <- hclust(as.dist(mdist), method="complete")
+plot(hc, cex = 0.6, hang = -1)
+
+# cluster based on defined distance separation - trial and erro to get reasonable clusters
+d <- 175000
+locs_df_hc_cut <- locs_df_hc_cut %>%
+  mutate(clust2 = cutree(hc, h=d))
+
+# print
+length(unique(locs_df_hc_cut$clust2))
+# 20
+
+
+# plot outputs
+pal <- colorFactor(
+  palette = "RdYlBu",
+  domain = locs_df_hc_cut$clust2)
+
+p <- leaflet(locs_df_hc_cut) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+  addCircles(~lng, ~lat,color = ~pal(clust2)) %>%
+  overlayTitle("Store Clusters") %>%
+  addLegend(position = "bottomright", values = ~clust2, pal = pal); p
+```
+
+Now that we have sensible clusters forming, the next step is to determine the location of the warehouses/depots that will service each region. For this, I will use simply the centroids - which can be computed using the mean lat,lng values
+
+```{r}
+# compute the centre of each cluster and plot this
+cluster_centroids <- locs_df_hc_cut %>%
+  group_by(clust2) %>%
+  summarize(mean_lng = mean(lng, na.rm=TRUE), mean_lat = mean(lat, na.rm=TRUE))
+
+
+p <- leaflet(locs_df_hc_cut) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+  addCircles(~lng, ~lat,color = ~pal(clust2)) %>%
+  overlayTitle("Store Clusters") %>%
+  addLegend(position = "bottomright", values = ~clust2, pal = pal) %>%
+  addMarkers(data = cluster_centroids, ~mean_lng, ~mean_lat, label = ~as.character(clust2)); p
+```
+
+Now we have the warehouse locations, and some initial clusters. However, we will see that in some cases the hierarchical clustering does not result in sensible assignments. For example, there are situations where bodies of water exist that simply clustering by coordinates (lat, lng) will be unable to take account of.
+
+e.g. in the below, we can see that a location is on the other side of the estuary
+```{r}
+cluster_number <- 8
+
+sample_cluster <- locs_df_hc_cut %>%
+  filter(clust2 == cluster_number)
+
+sample_centroid <- cluster_centroids %>%
+  filter(clust2 == cluster_number)
+
+p <- leaflet(sample_cluster) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+  addCircles(~lng, ~lat,color = ~pal(clust)) %>%
+  overlayTitle("Store Clusters") %>%
+  addLegend(position = "bottomright", values = ~clust2, pal = pal) %>%
+  addMarkers(data = sample_centroid, ~mean_lng, ~mean_lat); p
+```
+
+In practice this means that the drive distance required from the depot to restock the store is far greater than initially anticipated. Furthermore, there may be a nearer depot (belonging to another cluster) that is better suited for restocking this store.
+
+For this we will need to understand the drive time and reassign locations to their nearest cluster centre based on this.
+
+```{r}
+# create a checkpoint
+locs_df_hc_cut <- locs_df_hc_cut %>%
+  select(-clust) %>%
+  rename(cluster = clust2)
+
+cluster_centroids <- cluster_centroids %>%
+  rename(lat=mean_lat, lng=mean_lng, cluster = clust2)
+
+write_rds(locs_df_hc_cut, "data/cut_store_locs.rds")
+write_rds(cluster_centroids, "data/warehouse_locations.rds")
+```
+
+
+
+
+### Optimise Based on Drive Time
+
+For this part, we will leverage the brilliant Project OSRM (Open Source Routing Machine), which can be found here: https://github.com/Project-OSRM/osrm-backend
+
+It will leverage docker and allow us to run a local app, which we can send API request to in order determine the drive distance and time between location pairs.
+
+For further details on installation and running see the "install_osrm_docker.Rmd" file.
+
+```{r}
+store_locations <- read_rds("data/cut_store_locs.rds")
+warehouse_locations <- read_rds("data/warehouse_locations.rds")
+
+# create the string of warehouse locations
+coords <- c()
+for (row in 1:nrow(warehouse_locations)){
+  warehouse <- paste(warehouse_locations$lng[row], warehouse_locations$lat[row], sep=",")
+  coords <- append(coords, warehouse)
+  
+}
+warehouse_string <- paste(coords, collapse=";")
+
+# iterate through each store and find the nearest warehouse/depot
+cluster_vector <- c()
+for (row in 1:nrow(store_locations)){
+  location <- store_locations %>%
+    select(lng, lat) %>%
+    slice(row) %>%
+    paste(collapse=",")
+  
+  response <- GET(paste0("http://127.0.0.1:5000/table/v1/driving/", location, ";", warehouse_string, "?sources=0"))
+  result <- content(response, as='parsed')
+  
+  duration_matrix <- result$durations[[1]][-1] 
+  
+  nearest_warehouse <- warehouse_locations %>%
+    mutate(store_travel_duration = as.numeric(duration_matrix)) %>%
+    slice(which.min(.$store_travel_duration)) %>%
+    pull(cluster)
+  
+  cluster_vector <- append(cluster_vector, nearest_warehouse)
+  
+  if (row%%10 == 0){
+    print(paste0(row,"/",nrow(store_locations)))
+  }
+  
+}
+
+store_locations_updated <- store_locations %>%
+  mutate(updated_cluster = cluster_vector) %>%
+  rename(original_cluster = cluster) %>%
+  mutate(same_cluster = case_when(
+    original_cluster == updated_cluster ~ 1,
+    original_cluster != updated_cluster ~ 0
+    ))
+
+
+write_rds(store_locations_updated, "data/master_store_df.rds")
+```
+
+Now we can re-plot the updated cluster assignments to check that previous issues have been addressed
+
+```{r}
+store_locations_updated <- read_rds("data/master_store_df.rds")
+warehouse_locations <- read_rds("data/warehouse_locations.rds")
+
+
+# plot the new clusters
+pal <- colorFactor(
+  palette = "RdYlBu",
+  domain = store_locations_updated$updated_cluster)
+
+p <- leaflet(store_locations_updated) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+  addCircles(~lng, ~lat,color = ~pal(updated_cluster), label = ~as.character(updated_cluster)) %>%
+  overlayTitle("Store Clusters") %>%
+  addLegend(position = "bottomright", values = ~updated_cluster, pal = pal) %>%
+  addMarkers(data = warehouse_locations, ~lng, ~lat, label = ~as.character(cluster)); p
+
+```
+
+
+
+### Assigning Master vs Sub Warehouses/Depots
+
+The last thing we will do is to decide the appropriate mix of main warehouses/depots, and satellites/subs. We will aim for just 5 master depots, with 15 sub depots for servicing regions.
+
+For this we will look at the store count assigned to each cluster (with the idea being to assign main depots as those with most associated stores), and the geographic spread (to ensure our main depots offer adequate coverage across the country).
+
+This part is a slightly manual process.
+
+```{r}
+cluster_count <- store_locations_updated %>%
+  group_by(updated_cluster) %>%
+  tally()
+
+ggplot(cluster_count, aes(x = reorder(updated_cluster, -n), y = n)) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.3))
+
+```
+
+```{r}
+top_7 <- c(12, 3, 11, 15, 1, 6, 5, 2, 16)
+
+top_7_clusters <- store_locations_updated %>%
+  filter(updated_cluster %in% top_7)
+
+pal <- colorFactor(
+  palette = "RdYlBu",
+  domain = top_7_clusters$updated_cluster)
+
+p <- leaflet(top_7_clusters) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+  addCircles(~lng, ~lat,color = ~pal(updated_cluster)) %>%
+  overlayTitle("Store Clusters") %>%
+  addLegend(position = "bottomright", values = ~updated_cluster, pal = pal) %>%
+  addMarkers(data = warehouse_locations, ~lng, ~lat, label = ~as.character(cluster)); p
+```
+
+- London: Unsurprisingly London, with such a high population, captures the two largest clusters (3 & 12). Given the size of these clusters, we will take both as master depots
+- Manchester: The third biggest cluster (11) is located in Manchester. Given the ability to service the second largest number of stores, as well as the norther regions, it is reasonable to also take this as a master depot.
+- Birmingham: The decision for the next master depot, becomes a weigh up between clusters 1 & 15. However, given the proximity of cluster 15 to Manchester, I chose to select location 1 as a master depot, given it can be used to service service Wales and the Midlands, with the East of England being serviced out of Manchester or London as appropriate.
+- Glasgow: Lastly, it is also reasonable to assume a northern depot in Scotland to service the country, North of England, and Northern Ireland sub-depots. Glasgow (cluster 14) has the highest number of stores and is well located to service Northern Ireland on the west coast.
+
+
+From manual investigation, and some business logic we have assigned our 5 master depots. However, it is worth noting that this could be done using driving distance (e.g. pick 5 locations that minimise aggregated drive time to reach all sub-depots), or some alternative business logic. This would be an area of possible improvement.
+```{r}
+# plot the final map
+master_depots <- c(1, 3, 11, 12, 14)
+
+warehouse_locations <- warehouse_locations %>%
+  mutate(tier = ifelse(cluster %in% master_depots, 'master', 'sub')) %>%
+  mutate(icon_colour = ifelse(tier == "master", "red", "blue"))
+
+icons <- awesomeIcons(iconColor = "black",
+                      library = "ion",
+                      markerColor = warehouse_locations$icon_colour
+                      )
+
+pal <- colorFactor(
+  palette = "RdYlBu",
+  domain = store_locations_updated$updated_cluster)
+
+p <- leaflet(store_locations_updated) %>% addProviderTiles(providers$CartoDB.Positron)  %>%
+  addCircles(~lng, ~lat,color = ~pal(updated_cluster)) %>%
+  overlayTitle("Store Clusters") %>%
+  addLegend(position = "bottomright", values = ~updated_cluster, pal = pal) %>%
+  addAwesomeMarkers(data = warehouse_locations, ~lng, ~lat, icon = icons, label = ~as.character(cluster)); p
+
+
+```
+
+
+### Potential Improvements
+
+#### Vehicle Routing:
+The next step would be to determine the most optimal driving routes for trucks to leave each of the master depots to service the sub depots - i.e what is the most efficient method of trucks, leaving each of the the master depots, to service the sub-depots in our network. 
+
+If we assume, given the size of deliveries, it is realistic to have a single truck per sub-depot restock, the problem becomes simply a shortest duration calculation from each sub-depot to the master depots - which OSRM docker can handle.
+
+However, if you want just one truck per depot to be responsible for restocking each of the associated sub-depots, then we need to frame the problem as a "travelling salesman problem" - i.e. what is the shortest route for a single truck to visit all the necessary stops just once and return home to the master depot? For this, I would recommend exploring the VROOM Project (Vehicle Routing Open-Source Optimisation Machine): https://github.com/VROOM-Project 
+
+
+#### Master Depot Selection:
+As mentioned above, another potential improvement could be to select the location of the master depots, based not on the number of locations and manual business logic, but based on which 5 locations minimise the drive time to each of the remaining sub-depots. For this we could use OSRM docker also.
+
+
+#### Cluster Pruning:
+While arlier on we disregarded clusters that were extremely remote, there are still a few locations contained in our clusters that are rather remote, with the cluster being fairly spread (e.g. North East Scotland). 
+
+To address this, we could iteratively remove locations from our dataset that are a certain distance from the nearest cluster centre, and then perform reclustering. The intention would be to repeatedly "prune" the most remote locations in between rounds of clustering.
+
+This would result in more densely formed regions, but at the expense of excluding certain locations from our logistics network.
+
+
+
+### Closing Comments
+There we have it, our clustered store territories, with the proposed location of each warehouse and a proposed view of which should me major depots, and which should be sub-depots.
+
+While there are a few areas of potential improvement noted above, this project introduces and initial approach that can be taken to optimise logistics networks using geospatial data. The tools and techniques introduced can be used in their current form, or take further with mor complex approaches, to help companies gain actionable insights into their logistics, marketing, or acquisition approaches - and gain a competitive edge in their respective market.
