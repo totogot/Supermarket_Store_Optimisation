@@ -1,0 +1,142 @@
+---
+title: "install osrm docker"
+author: "totogot"
+output: html_notebook
+---
+
+This notebook is to be used as a guide to help install and launch Project OSRM docker, and demonstrates how to execute API requests
+
+
+### Installing Docker
+
+The first step is to correctly install Docker. This can be a little painful at times, but following the below steps should help in ensuring that all dependencies are installed in the correct order (please note: these steps were trialed in Windows 11)
+
+1.  First, to ensure compatibility install Linux from Step 4 in the following link: https://learn.microsoft.com/en-gb/windows/wsl/install-manual#step-4---download-the-linux-kernel-update-package
+
+2. Next activate WSL 2 and set it as your default version of Linux (follow Step 5 in the above link)
+
+3. Following this, download Ubuntu (22.04.1 LTS): https://apps.microsoft.com/store/detail/ubuntu-22041-lts/9PN20MSR04DW?hl=en-gb&gl=gb
+
+4. Restart your PC
+
+5. Now, install Docker from here: https://docs.docker.com/desktop/install/windows-install/
+
+6. Upon opening, ensure your "Docker engine" starts correctly. If so go to settings > resources > WSL Integration > and select the Ubuntu distribution that you have just downloaded
+
+
+### Installing OSRM Docker
+
+Now Docker is up and running, the next stage is th download and compile the OSRM. The fgollowing instructions adapted from the official documentation here: https://github.com/Project-OSRM/osrm-backend
+
+1. Create a directory into which you'll install your repositories you wish to unpack for Docker
+
+2. In Powershell Prompt, execute the following:
+```
+$ mkdir Documents\Docker_Repos\OSRM
+$ cd  Documents\Docker_Repos\OSRM
+$ wget http://download.geofabrik.de/europe/britain-and-ireland-latest.osm.pbf
+```
+ or (if you have memory issues when executing through PowerShell), download from here: http://download.geofabrik.de/europe.html and move to the folder
+ 
+3. Now execute the following command: 
+```
+$ docker run -t -v "%cd%:/data" osrm/osrm-backend osrm-extract -p /opt/car.lua /data/britain-and-ireland-latest.osm.pbf
+```
+This starts the container, creates directory "/data" inside the docker container, and makes the current working directory "%cd%" available there. Note: executing this command can take some time to run for the first time (i.e. 5mins)
+
+
+4. You will now see a running container on your Docker Desktop (with IMAGE showing as osrm-backend)
+
+5. Next execute, the following two commands one after another:
+```
+$ docker run -t -v "%cd%:/data" osrm/osrm-backend osrm-partition /data/britain-and-ireland-latest.osrm
+$ docker run -t -v "%cd%:/data" osrm/osrm-backend osrm-customize /data/britain-and-ireland-latest.osrm
+```
+
+6. We can now delete all running containers in Docker Desktop, just as a point of hygiene (as the above has started multiple different containers)
+
+7. Now before we run the docker container, we want to set up a private network in which we'll run it. This avoids the risk of different dockers interacting with apps in an unintended manner
+```
+$ docker network create OSRM_routing
+$ docker network ls
+```
+The second command above will print a list of all Docker networks, and is a way of checking to see you've launched a new one
+
+
+
+### Launch Docker and Execute API Request
+
+Now we can launch the container (ensuring you are in the correct directory, and that you have launched Docker Desktop engine before executing)
+```
+$ cd Documents/Docker_Repos/OSRM
+$ docker run --net OSRM_routing --name OSRM -t -i -p 5000:5000 -v "%cd%:/data" osrm/osrm-backend osrm-routed --algorithm mld /data/britain-and-ireland-latest.osrm 
+```
+Looking at Docker Desktop, you will be able to see that you now have a running container names OSRM.
+
+We can now test the container is working by passing requests to it, via the exposed end-point (on our local machine at port 5000). To do this, in another command prompt window, execute the following:
+```
+$ curl "http://127.0.0.1:5000/route/v1/driving/-1.923127,52.517037;0.563423,52.496891?steps=true"
+```
+For full API usage details, see documentation: https://project-osrm.org/docs/v5.22.0/api/#route-service
+
+
+To get the nearest distance between location pairs, we can use the table method:
+```
+$ curl "http://127.0.0.1:5000/table/v1/driving/-1.923127,52.517037;0.563423,52.496891;-1.520016,52.421238"
+```
+The responses returned from the app will be shown as a string in our command terminal. The response returned is a 3x3 matrix showing the duration between each pair
+
+A simple example in R
+```{r}
+response <- GET("http://127.0.0.1:5000/table/v1/driving/-1.923127,52.517037;0.563423,52.496891;-1.520016,52.421238")
+result <- content(response, as='parsed')
+
+duration_matrix <- as.matrix(do.call("cbind", result$durations))
+print(duration_matrix)
+#      [,1]   [,2]   [,3]  
+# [1,] 0      9343.4 1976.6
+# [2,] 9291.9 0      8172  
+# [3,] 1963.2 8201.2 0  
+```
+
+A slightly more complex example using data created in the main notebook (will only work if you have created the data)
+```{r}
+# to determine the distance from each location to the cluster centres
+store_locations <- read_rds("data/cut_store_locs.rds")
+warehouse_locations <- read_rds("data/warehouse_locations.rds")
+
+# create the string of warehouse locations
+coords <- c()
+for (row in 1:nrow(warehouse_locations)){
+  warehouse <- paste(warehouse_locations$lng[row], warehouse_locations$lat[row], sep=",")
+  coords <- append(coords, warehouse)
+  
+}
+warehouse_string <- paste(coords, collapse=";")
+
+
+# obtain store coords
+test_location <- store_locations %>%
+  select(lng, lat) %>%
+  slice(4) %>%
+  paste(collapse=",")
+
+# create full request
+response <- GET(paste0("http://127.0.0.1:5000/table/v1/driving/", test_location, ";", warehouse_string, "?sources=0"))
+result <- content(response, as='parsed')
+#print(result)
+
+duration_matrix <- result$durations[[1]][-1] 
+# we drop the first element as this is duration from store to itself (i.e. 0)
+
+# obtain nearest warehouse
+nearest_warehouse <- warehouse_locations %>%
+  mutate(store_travel_duration = duration_matrix) %>%
+  slice(which.max(.$store_travel_duration)) %>%
+  pull(cluster)
+
+print(paste0('Nearest warehouse = ', nearest_warehouse))
+
+```
+
+we are now ready to continue in R...

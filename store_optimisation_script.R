@@ -1,3 +1,7 @@
+#################################################################################################
+#################################################################################################
+# PACKAGES
+
 #install.packages("leaflet")
 #install.packages("tidyverse")
 #install.packages("leaflet")
@@ -27,7 +31,10 @@ library(dendextend)
 library(dbscan)
 library(curl)
 
-##########
+
+
+#################################################################################################
+#################################################################################################
 # FUNCTIONS
 
 # add leaflet title
@@ -88,8 +95,17 @@ calcCloseStore <- function(master_stores, target_stores) {
   return(close_stores)
 }
 
-##########
 
+
+#################################################################################################
+#################################################################################################
+# MAIN RUN
+
+
+
+############ Initial Exploration
+
+# load starting data
 all_stores <- read_xls('data/GEOLYTIX - UK RetailPoints/uk_glx_open_retail_points_v24_202206.xls')
 
 # plot store count by retailer
@@ -101,13 +117,24 @@ ggplot(retailer_count, aes(x = reorder(retailer, -n), y = n)) +
   geom_bar(stat = "identity") + theme_minimal() +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.3))
 
-# compute the percentage
-######WORK OUT PERCENTAGE AND THEN INSERT INTO THE EXPLANATION NEXT
+# plot store count by cluster as %
+retailer_count <- retailer_count %>%
+  mutate(percentage = (n / sum(n))*100)
 
-# plot location of major chains
+ggplot(retailer_count, aes(x = reorder(retailer, -percentage), y = percentage)) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.3))
+
+# create list of largest stores
 majors <- c("Aldi", "Asda", "Lidl", "Marks and Spencer", "Morrisons", 
             "Sainsburys", "Tesco", "The Co-operative Group", "Waitrose")
 
+# compute % of stores captured by major chains
+print(retailer_count %>% filter(retailer %in% majors) %>% pull(percentage) %>% sum)
+# 66.975 %
+# the major chains capture 2/3rds of the universe
+
+# plot location of major chains
 major_retailers <- all_stores %>% filter(`retailer` %in% majors) %>%
   select(id, retailer, postcode, lng = long_wgs, lat = lat_wgs, size_band)
 
@@ -123,12 +150,14 @@ p <- leaflet(major_retailers) %>% addTiles() %>%
   addLegend(position = "bottomright", values = ~retailer, pal = pal); p
 
 
-#------ PURCHASE COMPETITOR LOCATIONS
 
-# assuming we are Tesco and are looking to acquire one of the other supermarket chains
-# the condition under which we will acquire is based on which chain offers the best coverage
-# but where there is minimum overlap with existing Tesco locations
-# i.e. the competitor where least % of stores within a certain radius of Tesco stores
+############ Purchase of Competitor
+
+# assuming we are Tesco (as the largest supermarket) and are looking to acquire one of the other chains
+# imagine that condition under which we will acquire is based on which chain offers the "best coverage"
+# taht is to say, where there is minimum overlap with existing Tesco locations
+
+# i.e. find the competitor where least % of stores within a certain radius of Tesco stores
 
 # we will set a cut-off of 500m each other - based on Haversine distance
 major_retailers <- major_retailers %>% 
@@ -154,7 +183,7 @@ for (brand in targets){
   print(brand)
   print((close_stores/nrow(target_loc))*100)
 }
-
+# ------results
 # "Aldi"
 # 26.34298
 # "Asda"
@@ -172,13 +201,32 @@ for (brand in targets){
 # "Waitrose"
 # 35.18006
 
-# from the above results we see that Morrisons or Asda have the lowest %
+# from the above results we see that Morrisons and Asda have the lowest %
+# it is also interesting to see the number of stores these brands offer
 
 print(retailer_count %>% filter(retailer %in% c('Asda', 'Morrisons')))
 # Asda        637
 # Morrisons   901
 
-# given Morrisons has the lowest % and more stores, we will elect for acquiring it
+# as well as the array of store sizes - and how this compares to Tesco
+store_size_counts <- all_stores %>%
+  filter(retailer %in% c('Tesco', 'Asda', 'Morrisons')) %>%
+  group_by(retailer, size_band) %>%
+  tally() %>%
+  group_by(retailer) %>%
+  mutate(percentage_stores = (n / sum(n))*100)
+
+
+ggplot(store_size_counts, aes(x = size_band, y = percentage_stores, fill=retailer)) +
+  geom_col(position = "dodge") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.3))
+
+# interestingly we see that Asda has a distinctly different business model
+# with far greater focus (>50%) of their stores being large superstores
+# while Tesco and Morrisons are more similar (although Tesco has greater % small stores)
+
+# given Morrisons has the lowest %, more stores and similar profile, we elect to "acquire" it
 
 # create a combined dataset
 combined_stores <- major_retailers %>%
@@ -189,18 +237,22 @@ p <- leaflet(combined_stores) %>% addTiles() %>%
   addCircles(~lng, ~lat,color = 'blue', radius = 500, opacity = .5) %>%
   overlayTitle("Tesco Store Locations"); p
 
-
+# save down combined dataset
 write_rds(combined_stores, "data/combined_store.rds")
 
-#------ DECIDING WHICH STORES TO CLOSE
+
+
+
+############ Identifying Which Stores to Close
 
 # now we have a group of store locations, next we can optimise the portfolio
-# we will do this by ensuring that there are no stores within 5minutes drive
-# and where there is we will prioritise stores based on size and demographic data
+# we will do this by opting to close stores in the same location
+# however, we will need some logic to prioritise which stores to keep stores
 
+# load checkpoint dataset
 combined_stores <- read_rds("data/combined_store.rds")
 
-# first find the row numbers for the morrisons stores 
+# split by brand
 tesco_stores <- combined_stores %>%
   filter(retailer == 'Tesco')
 
@@ -213,26 +265,27 @@ tesco_stores_sf <- st_as_sf(tesco_stores, coords=c('lng', 'lat'), crs="epsg:4326
 morrisons_stores_sf <- st_as_sf(morrisons_stores, coords=c('lng', 'lat'), crs="epsg:4326")
 
 # compute distance matrix
-# each row represents a target location and columns their distance to a master store (in meters)
 dist_sf = st_distance(tesco_stores_sf, morrisons_stores_sf)
 
+# note: each row represents a Tesco location and columns their distance to a Morrisons store (in meters)
 M <- as.matrix(dist_sf)
 M <- unclass(M)
 
 #create binary matrix to show where Tesco store (row) within 500m of Morrisons (column) 
 M[] <- ifelse(M<500,1,0)
 
-# convert to dataframe
+# convert to dataframe and add column to indicate Tesco index number
 dist_sf <- data.frame(M)
 
 dist_sf <- rownames_to_column(dist_sf) %>%
   rename(tesco_index = rowname)
 
+# convert from wide-form to long-form
 close_store_df <- dist_sf %>% 
-  gather(morrisons_index, flag, -c(tesco_index)) %>%
+  gather(key = morrisons_index, value = flag, -c(tesco_index)) %>%
   filter(flag == 1)
 
-# remove the "X" from the morrisons store index
+# clean up the morrions index column - removing the "X" from the naming convention
 close_store_df <- close_store_df %>%
   rowwise() %>%
   mutate(morrisons_index = str_remove(morrisons_index, "X")) %>%
@@ -246,18 +299,25 @@ n_distinct(close_store_df$tesco_index)
 n_distinct(close_store_df$morrisons_index)
 # 111
 
-# join back to the master tesco to indicate morrisons index locations
+# join back to the Tesco master to indicate Morrisons locations
 tesco_stores_df <- rownames_to_column(tesco_stores) %>%
   rename(tesco_index = rowname) %>%
   inner_join(close_store_df, by='tesco_index')
 
-# join on the relevant morrisons store data
+# join on the relevant Morrisons store data
 morrisons_stores_df <- rownames_to_column(morrisons_stores) %>%
   rename(morrisons_index = rowname)
   
 store_pairs <- tesco_stores_df %>%
   left_join(morrisons_stores_df, by='morrisons_index')
 
+
+#######
+#######
+#######
+#######
+#######
+#######
 
 # map postcodes to output Layer Super Output Area (LSAO)
 # https://geoportal.statistics.gov.uk/datasets/06938ffe68de49de98709b0c2ea7c21a/about
@@ -270,34 +330,44 @@ income_data <- read_excel(
   sheet = "Gross disposable income", 
   skip = 2)
 
+#######
+#######
+#######
+#######
+#######
 
 
 
-#------ DECIDING MOST APPROPRIATE WAREHOUSE LOCATIONS
 
-# after optimising the locations, we will decide where best to set up outlet depots
-# we will achieve this by determining the best geographic clusters - using KMeans
-# the aim is to form clusters that capture the maximum number of stores, without overlap
+############ Deciding Most Appropriate Warehouse Locations
+
+# after optimising the locations, we will decide where best to set up supply depots
+# we will achieve this by determining the best geographic clusters
+# the aim is to form clusters that capture the closest stores, without overlap
 # the distribution warehouses/depots would then be located at the centroids of the clusters
 
-
+# load combined store set
 combined_stores <- read_rds("data/combined_store.rds")
 
+# take just the lat and lng coordinates
 locs_df <- combined_stores %>%
   select("id","lng", "lat") %>%
   column_to_rownames("id")
 
+# set random seed to ensure repeatability of clustering
 set.seed(123)
 
 
 #-- KMEANS CLUSTERING
 
-# Compute k-means with k = 20
+# ok results but bad practice to use K means when it comes to geospatial data
 
+# Compute k-means with k = 20
 km.res <- kmeans(locs_df, 20)
 
 print(km.res)
 
+# assign the cluster numbers
 locs_df_km<- locs_df %>% 
   mutate(clust = km.res$cluster)
 
@@ -329,6 +399,7 @@ ggplot(cluster_count_km, aes(x = reorder(clust, -n), y = n)) +
 
 #-- DBSCAN CLUSTERING
 
+# trialed but lead to really poor results
 
 clusters <- dbscan(locs_df, eps = 0.25, minPts = 100)[['cluster']]
 
@@ -351,6 +422,8 @@ p <- leaflet(locs_df_db) %>% addProviderTiles(providers$CartoDB.Positron) %>%
 
 
 #-- HIERARCHICAL CLUSTERING
+
+# chosen method for initial clustering
 
 # compute distance matrix - between location pairs
 locs_sf <- st_as_sf(locs_df, coords=c('lng', 'lat'), crs="epsg:4326")
@@ -400,7 +473,7 @@ ggplot(cluster_count_hc, aes(x = reorder(clust, -percentage), y = percentage)) +
   theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.3))
 
 
-# we found that the clusters with few store locations tended to be on isoltated locations
+# we found that the clusters with few store locations tended to be on isolated locations
 # plot outputs - exploratory only
 sample_cluster <- locs_df_hc %>%
   filter(clust == 8)
